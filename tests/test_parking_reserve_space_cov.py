@@ -16,7 +16,7 @@ def test_reserve_space_existed_path():
         u = User(username="rs_user" + phone[-4:], phone_number=phone, email=f"rs{phone[-4:]}@test.com", password_hash=get_password_hash("pass123"))
         db.add(u)
         db.flush()
-        v = Vehicle(user_id=u.id, license_plate="RS-TEST")
+        v = Vehicle(user_id=u.id, license_plate="RS-" + uuid.uuid4().hex[:8])
         db.add(v)
         db.flush()
         # find any available space from existing data

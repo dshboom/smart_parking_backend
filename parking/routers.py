@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 import asyncio
 from realtime.ws_manager import manager
 from sqlalchemy.orm import Session
+from sqlalchemy import update
 from typing import List
 from .models import Vehicle, ParkingLot, BillingRule, ParkingRecord, Payment, Reservation, ParkingLotLayout, ParkingSpace
 from .schemas import (
@@ -446,6 +447,18 @@ def update_parking_lot_layout(lot_id: int, request: ParkingLotLayoutUpdate, db: 
 
 @router.get("/parking-lots/{lot_id}/spaces", response_model=List[ParkingSpaceRead])
 def list_parking_spaces(lot_id: int, status_value: str | None = None, space_type: str | None = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    from datetime import datetime, timezone
+    from parking.services import unreserve_space
+    from auth.core.enums import SpaceStatus
+    now = datetime.now(timezone.utc)
+    try:
+        expired_spaces = db.query(ParkingSpace).filter(ParkingSpace.parking_lot_id == lot_id, ParkingSpace.status == SpaceStatus.RESERVED, ParkingSpace.reserved_until != None, ParkingSpace.reserved_until < now).all()
+        for sp in expired_spaces:
+            unreserve_space(db, sp.id)
+        if expired_spaces:
+            db.commit()
+    except Exception:
+        db.rollback()
     q = db.query(ParkingSpace).filter(ParkingSpace.parking_lot_id == lot_id)
     if status_value:
         from auth.core.enums import SpaceStatus
@@ -588,6 +601,18 @@ def api_navigate(lot_id: int, request: NavigateRequest, db: Session = Depends(ge
 
 @router.get("/parking-lots/{lot_id}/stats", response_model=ParkingStatsRead)
 def api_stats(lot_id: int, db: Session = Depends(get_db)):
+    try:
+        from datetime import datetime, timezone
+        from parking.services import unreserve_space
+        from auth.core.enums import SpaceStatus
+        now = datetime.now(timezone.utc)
+        expired_spaces = db.query(ParkingSpace).filter(ParkingSpace.parking_lot_id == lot_id, ParkingSpace.status == SpaceStatus.RESERVED, ParkingSpace.reserved_until != None, ParkingSpace.reserved_until < now).all()
+        for sp in expired_spaces:
+            unreserve_space(db, sp.id)
+        if expired_spaces:
+            db.commit()
+    except Exception:
+        db.rollback()
     return get_parking_stats(db, lot_id)
 @router.post("/parking-records/{record_id}/vacate", response_model=ParkingRecordRead)
 def vacate_by_record(record_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
@@ -649,14 +674,7 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
             v = db.query(Vehicle).filter(Vehicle.id == rec.vehicle_id).first()
             if not v or v.user_id != current_user.id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该记录")
-        # 若仍占用车位，优先释放
-        space = None
-        if rec.space_id:
-            space = db.query(ParkingSpace).filter(ParkingSpace.id == rec.space_id).first()
-        else:
-            space = db.query(ParkingSpace).filter(ParkingSpace.parking_lot_id == rec.parking_lot_id, ParkingSpace.vehicle_id == rec.vehicle_id).first()
-        if space and space.status == SpaceStatus.OCCUPIED:
-            vacate_space(db, space.id, datetime.utcnow())
+        # 直接完成计费与结算，不强依赖空间状态释放
         # 完成计费（若尚未完成），确保存在计费规则
         if rec.exit_time is None or rec.status == ParkingRecordStatus.PARKED:
             if rec.parking_lot_id is None:
@@ -672,17 +690,22 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
                 )
                 db.add(rule)
                 db.flush()
-            completed = complete_parking_record(db, record_id, datetime.utcnow())
-            db.refresh(completed)
-            rec = completed
-        # 幂等：如已有余额成功支付，则直接完成并尝试清理记录
+            try:
+                completed = complete_parking_record(db, record_id, datetime.utcnow())
+                db.refresh(completed)
+                rec = completed
+            except Exception:
+                rec.exit_time = datetime.utcnow()
+                rec.fee = 0
+                rec.status = ParkingRecordStatus.UNPAID
+                db.execute(
+                    update(ParkingLot)
+                    .where(ParkingLot.id == rec.parking_lot_id, ParkingLot.available_spots < ParkingLot.total_capacity)
+                    .values(available_spots=ParkingLot.available_spots + 1)
+                )
+        # 幂等：如已有余额成功支付，则直接返回成功
         existing_success = db.query(Payment).filter(Payment.parking_record_id == record_id, Payment.status == PaymentStatus.SUCCESS).first()
         if existing_success:
-            # 清理：将支付脱钩并删除记录
-            pays = db.query(Payment).filter(Payment.parking_record_id == record_id).all()
-            for p in pays:
-                p.parking_record_id = None
-            db.delete(rec)
             db.commit()
             return {"detail": "已结算", "amount": str(existing_success.amount)}
         # 使用余额结算
@@ -694,11 +717,7 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
         if not ok:
             db.rollback()
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="余额不足")
-        # 余额结算成功后，脱钩支付记录并删除停车记录
-        pays = db.query(Payment).filter(Payment.parking_record_id == record_id).all()
-        for p in pays:
-            p.parking_record_id = None
-        db.delete(rec)
+        # 余额结算成功：保证记录状态为 PAID，保留记录以支持幂等
         db.commit()
         return {"detail": "结算成功", "amount": str(amount)}
     except HTTPException as e:
