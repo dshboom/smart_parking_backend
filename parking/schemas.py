@@ -181,7 +181,7 @@ class VacateSpaceRequest(BaseModel):
 
 class ReserveSpaceRequest(BaseModel):
     user_id: int
-    vehicle_id: int
+    vehicle_id: Optional[int] = None
     reserved_until: Optional[datetime] = None
 
 class NearestSpaceRequest(BaseModel):

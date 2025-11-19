@@ -144,17 +144,20 @@ def mark_payment_success(db: Session, payment_id: int, transaction_id: str | Non
             record.status = ParkingRecordStatus.PAID
     else:
         rsv = db.query(Reservation).filter(Reservation.id == payment.reservation_id).first()
-        if rsv and rsv.status == ReservationStatus.PENDING:
-            dec = db.execute(
-                update(ParkingLot)
-                .where(ParkingLot.id == rsv.parking_lot_id, ParkingLot.available_spots > 0)
-                .values(available_spots=ParkingLot.available_spots - 1)
-            )
-            if dec.rowcount == 1:
-                rsv.status = ReservationStatus.ACTIVE
+        if rsv:
+            # 记录预约费用，便于前端展示
+            rsv.reservation_fee = payment.amount
+            if rsv.status == ReservationStatus.PENDING:
+                dec = db.execute(
+                    update(ParkingLot)
+                    .where(ParkingLot.id == rsv.parking_lot_id, ParkingLot.available_spots > 0)
+                    .values(available_spots=ParkingLot.available_spots - 1)
+                )
+                if dec.rowcount == 1:
+                    rsv.status = ReservationStatus.ACTIVE
     return payment
 
-def create_reservation(db: Session, user_id: int, vehicle_id: int, parking_lot_id: int, reservation_time: datetime, expires_at: datetime, reservation_fee: Decimal | None) -> Reservation | None:
+def create_reservation(db: Session, user_id: int, vehicle_id: int | None, parking_lot_id: int, reservation_time: datetime, expires_at: datetime, reservation_fee: Decimal | None) -> Reservation | None:
     lot = db.query(ParkingLot).filter(ParkingLot.id == parking_lot_id).first()
     if not lot:
         return None
@@ -269,7 +272,7 @@ def get_layout(db: Session, lot_id: int) -> ParkingLotLayout | None:
     return db.query(ParkingLotLayout).filter(ParkingLotLayout.parking_lot_id == lot_id).first()
 
 # --- 车位操作 ---
-def occupy_space(db: Session, space_id: int, vehicle_id: int | None, license_plate: str | None) -> Tuple[ParkingSpace, ParkingRecord] | None:
+def occupy_space(db: Session, space_id: int, vehicle_id: int | None, license_plate: str | None, user_id: int | None = None) -> Tuple[ParkingSpace, ParkingRecord] | None:
     space = db.query(ParkingSpace).filter(ParkingSpace.id == space_id).with_for_update().first()
     if not space:
         return None
@@ -285,7 +288,12 @@ def occupy_space(db: Session, space_id: int, vehicle_id: int | None, license_pla
     # 如果是预留状态，确认是否存在绑定该space的ACTIVE预约
     if space.status == SpaceStatus.RESERVED:
         now = datetime.now(timezone.utc)
-        rsv = db.query(Reservation).filter(Reservation.space_id == space.id, Reservation.vehicle_id == vehicle.id, Reservation.status == ReservationStatus.ACTIVE, Reservation.expires_at >= now).first()
+        q = db.query(Reservation).filter(Reservation.space_id == space.id, Reservation.status == ReservationStatus.ACTIVE, Reservation.expires_at >= now)
+        if user_id is not None:
+            q = q.filter(Reservation.user_id == user_id)
+        else:
+            q = q.filter(Reservation.vehicle_id == vehicle.id)
+        rsv = q.first()
         if not rsv:
             return None
         rsv.status = ReservationStatus.COMPLETED
@@ -334,7 +342,7 @@ def vacate_space(db: Session, space_id: int, exit_time: datetime | None = None) 
     space.reserved_until = None
     return (space, completed)
 
-def reserve_space(db: Session, space_id: int, user_id: int, vehicle_id: int, reserved_until: datetime | None = None) -> Reservation | None:
+def reserve_space(db: Session, space_id: int, user_id: int, vehicle_id: int | None, reserved_until: datetime | None = None) -> Reservation | None:
     space = db.query(ParkingSpace).filter(ParkingSpace.id == space_id).with_for_update().first()
     if not space or space.status != SpaceStatus.AVAILABLE:
         return None
@@ -350,7 +358,7 @@ def reserve_space(db: Session, space_id: int, user_id: int, vehicle_id: int, res
     if rsv.status == ReservationStatus.ACTIVE:
         space.status = SpaceStatus.RESERVED
         space.reserved_until = end_time
-        space.vehicle_id = vehicle_id
+        space.vehicle_id = vehicle_id if vehicle_id is not None else None
         rsv.space_id = space.id
     return rsv
 

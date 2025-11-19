@@ -67,7 +67,7 @@ class Reservation(Base):
     __tablename__ = "reservations"
     id = Column(BigInteger().with_variant(Integer, 'sqlite'), primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    vehicle_id = Column(Integer, ForeignKey("vehicles.id", ondelete="CASCADE"), nullable=False, index=True)
+    vehicle_id = Column(Integer, ForeignKey("vehicles.id", ondelete="CASCADE"), nullable=True, index=True)
     parking_lot_id = Column(Integer, ForeignKey("parking_lots.id", ondelete="CASCADE"), nullable=False, index=True)
     space_id = Column(Integer, ForeignKey("parking_spaces.id", ondelete="SET NULL"), nullable=True, index=True)
     reservation_fee = Column(Numeric(10, 2), nullable=True)

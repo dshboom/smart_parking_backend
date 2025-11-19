@@ -513,7 +513,7 @@ async def occupy_parking_space(space_id: int, request: OccupySpaceRequest, db: S
         if not vehicle_id:
             dv = db.query(Vehicle).filter(Vehicle.user_id == current_user.id, Vehicle.is_default == True).first()
             vehicle_id = dv.id if dv else None
-        res = occupy_space(db, space_id, vehicle_id, request.license_plate)
+        res = occupy_space(db, space_id, vehicle_id, request.license_plate, current_user.id)
         if not res:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="占用失败")
         space, record = res
@@ -554,7 +554,17 @@ async def reserve_parking_space(space_id: int, request: ReserveSpaceRequest, db:
     try:
         if current_user.id != request.user_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户不匹配")
-        rsv = reserve_space(db, space_id, request.user_id, request.vehicle_id, request.reserved_until)
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        existed_user_rsv = db.query(Reservation).filter(
+            Reservation.user_id == current_user.id,
+            Reservation.status.in_([ReservationStatus.PENDING, ReservationStatus.ACTIVE]),
+            Reservation.expires_at >= now,
+        ).first()
+        if existed_user_rsv:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="您已有有效预约，请先取消或到期后再预约")
+        vehicle_id = request.vehicle_id
+        rsv = reserve_space(db, space_id, request.user_id, vehicle_id, request.reserved_until)
         if not rsv:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="预留失败")
         db.commit()
@@ -728,3 +738,10 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
         if isinstance(e, BillingRuleNotFoundError):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="计费规则不存在")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="内部错误")
+@router.get("/reservations/me", response_model=List[ReservationRead])
+def list_my_reservations(skip: int = 0, limit: int = 20, status_value: ReservationStatus | None = ReservationStatus.ACTIVE, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    q = db.query(Reservation).join(Vehicle, Vehicle.id == Reservation.vehicle_id).filter(Reservation.user_id == current_user.id)
+    if status_value is not None:
+        q = q.filter(Reservation.status == status_value)
+    items = q.order_by(Reservation.reservation_time.desc()).offset(skip).limit(limit).all()
+    return items

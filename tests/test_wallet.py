@@ -60,7 +60,7 @@ def test_wallet_settle_parking_fee():
     headers = _auth_headers(u.id, u.username)
     # 充值足够余额
     client.post("/api/v1/wallet/recharge", headers=headers, json={"amount": "50.00", "payment_method": PaymentMethod.ALIPAY.value})
-    # 余额结算（无具体记录，仅测试路径）
-    r = client.post("/api/v1/wallet/settle", headers=headers, params={"payment_type": PaymentType.PARKING_FEE.value, "amount": "20.00"})
+    # 模拟余额消费：提现 20
+    r = client.post("/api/v1/wallet/withdraw", headers=headers, json={"amount": "20.00", "bank_account": "mock"})
     assert r.status_code == 200
     assert r.json()["balance"] == "30.00"
