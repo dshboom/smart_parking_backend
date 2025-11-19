@@ -27,7 +27,7 @@ from .services import (
 )
 from auth.database import get_db
 from auth.services.auth_service import get_current_user
-from auth.core.enums import VehicleStatus, UserRole, PaymentType
+from auth.core.enums import VehicleStatus, UserRole, PaymentType, ParkingRecordStatus
 import os, hmac, hashlib
 from auth.core.enums import ReservationStatus, PaymentStatus, SpaceStatus
 from datetime import datetime
