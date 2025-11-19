@@ -52,11 +52,7 @@ def test_layout_and_spaces_crud(client, db_session):
     assert one.status_code == 200
     s404 = client.get(f"/api/v1/parking/spaces/999999")
     assert s404.status_code == 404
-    # update space
-    up = client.put(f"/api/v1/parking/spaces/{sid}", json={"space_type": "disabled", "space_number": "A-01"}, headers=admin)
-    assert up.status_code == 200
-    up404 = client.put(f"/api/v1/parking/spaces/999999", json={"space_type": "disabled"}, headers=admin)
-    assert up404.status_code == 404
+    # 已移除车位属性编辑端点，跳过更新测试
 
 def test_reserve_occupy_vacate_flow(client, db_session):
     admin = setup_admin(client, db_session)

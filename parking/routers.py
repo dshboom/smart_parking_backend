@@ -13,7 +13,7 @@ from .schemas import (
     PaymentCreate, PaymentRead,
     ReservationRead,
     ParkingLotLayoutRead, ParkingLotLayoutUpdate,
-    ParkingSpaceRead, ParkingSpaceUpdate,
+    ParkingSpaceRead,
     OccupySpaceRequest, VacateSpaceRequest, ReserveSpaceRequest,
     NearestSpaceRequest, NearestSpaceResponse,
     NavigateRequest, NavigateResponse,
@@ -481,26 +481,7 @@ def get_parking_space(space_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="车位不存在")
     return sp
 
-@router.put("/parking/spaces/{space_id}", response_model=ParkingSpaceRead)
-def update_parking_space(space_id: int, request: ParkingSpaceUpdate, db: Session = Depends(get_db), current_admin=Depends(require_admin)):
-    try:
-        sp = db.query(ParkingSpace).filter(ParkingSpace.id == space_id).first()
-        if not sp:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="车位不存在")
-        if request.space_type is not None:
-            sp.space_type = request.space_type
-        if request.status is not None:
-            sp.status = request.status
-        if request.space_number is not None:
-            sp.space_number = request.space_number
-        db.commit()
-        db.refresh(sp)
-        return sp
-    except HTTPException as e:
-        raise e
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="内部错误")
+    
 
 @router.post("/parking/spaces/{space_id}/occupy", response_model=ParkingRecordRead)
 async def occupy_parking_space(space_id: int, request: OccupySpaceRequest, db: Session = Depends(get_db), current_user=Depends(get_current_user)):

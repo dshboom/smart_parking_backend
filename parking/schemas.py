@@ -167,11 +167,6 @@ class ParkingSpaceRead(BaseModel):
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
-class ParkingSpaceUpdate(BaseModel):
-    space_type: Optional[SpaceType] = None
-    status: Optional[SpaceStatus] = None
-    space_number: Optional[str] = None
-
 class OccupySpaceRequest(BaseModel):
     vehicle_id: Optional[int] = None
     license_plate: Optional[str] = None

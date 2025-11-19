@@ -31,23 +31,7 @@ def test_update_layout_commit_failure_returns_500(client, db_session, monkeypatc
     finally:
         monkeypatch.setattr(_Session, "commit", original)
 
-def test_update_parking_space_commit_failure_returns_500(client, db_session, monkeypatch):
-    admin, user, v = setup_admin_user_vehicle(client, db_session)
-    lot = client.post("/api/v1/parking-lots", json={"name":"LotUS","address":"AddrUS","total_capacity":0,"available_spots":0}, headers=admin).json()
-    grid = [["entrance","road","parking"],["road","road","exit"],["road","road","parking"]]
-    client.put(f"/api/v1/parking-lots/{lot['id']}/layout", json={"rows":3,"cols":3,"grid":grid,"entrance_position":{"row":0,"col":0},"exit_position":{"row":1,"col":2}}, headers=admin)
-    spaces = client.get(f"/api/v1/parking-lots/{lot['id']}/spaces").json()
-    sid = spaces[0]["id"]
-    from sqlalchemy.orm.session import Session as _Session
-    original = _Session.commit
-    def boom(self):
-        raise RuntimeError("boom")
-    monkeypatch.setattr(_Session, "commit", boom)
-    try:
-        resp = client.put(f"/api/v1/parking/spaces/{sid}", json={"space_type":"disabled"}, headers=admin)
-        assert resp.status_code == 500
-    finally:
-        monkeypatch.setattr(_Session, "commit", original)
+# 已移除车位属性编辑端点，跳过相关提交失败测试
 
 def test_occupy_with_license_plate_and_commit_failure(client, db_session, monkeypatch):
     admin, user, v = setup_admin_user_vehicle(client, db_session)

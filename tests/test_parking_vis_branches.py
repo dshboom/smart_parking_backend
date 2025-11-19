@@ -54,10 +54,7 @@ def test_space_detail_update_and_404(client, db_session):
     assert one.status_code == 200
     s404 = client.get("/api/v1/parking/spaces/999999")
     assert s404.status_code == 404
-    up = client.put(f"/api/v1/parking/spaces/{sid}", json={"space_type": "disabled"}, headers=admin)
-    assert up.status_code == 200
-    up404 = client.put("/api/v1/parking/spaces/999999", json={"space_type": "disabled"}, headers=admin)
-    assert up404.status_code == 404
+    # 已移除车位属性编辑端点，跳过更新测试
 
 def test_occupy_failures_and_success_paths(client, db_session):
     admin, user = setup_admin_and_user(client, db_session)
@@ -66,10 +63,7 @@ def test_occupy_failures_and_success_paths(client, db_session):
     sid = spaces[0]["id"]
     r_none = client.post("/api/v1/parking/spaces/999999/occupy", json={}, headers=user)
     assert r_none.status_code == 400
-    client.put(f"/api/v1/parking/spaces/{sid}", json={"status": "maintenance"}, headers=admin)
-    r_bad_status = client.post(f"/api/v1/parking/spaces/{sid}/occupy", json={}, headers=user)
-    assert r_bad_status.status_code == 400
-    client.put(f"/api/v1/parking/spaces/{sid}", json={"status": "available"}, headers=admin)
+    # 维护/可用状态切换已移除，直接验证占用成功路径
     ok = client.post(f"/api/v1/parking/spaces/{sid}/occupy", json={}, headers=user)
     assert ok.status_code == 200
 
