@@ -1,3 +1,4 @@
+# /core/enums.py wll
 import enum
 
 class UserStatus(enum.Enum):

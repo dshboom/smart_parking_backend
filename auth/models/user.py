@@ -1,3 +1,4 @@
+# /models/user.py wll
 from sqlalchemy import (Column, Integer, String, Boolean,
                         ForeignKey, Enum, Index)
 from sqlalchemy.dialects.mysql import TIMESTAMP
@@ -82,6 +83,7 @@ class UserOperationLog(Base):
         Index('idx_operation_logs_user_time', 'user_id', 'operation_time'),
         Index('idx_operation_logs_type_module', 'operation_type', 'operation_module'),
     )
+
 
 class RefreshToken(Base):
     __tablename__ = "refresh_tokens"

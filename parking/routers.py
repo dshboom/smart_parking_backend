@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+# routers.py wll
+from fastapi import APIRouter, Depends, HTTPException, status, Request, BackgroundTasks
 import asyncio
 from realtime.ws_manager import manager
 from sqlalchemy.orm import Session
@@ -30,9 +31,9 @@ from auth.services.auth_service import get_current_user
 from auth.core.enums import VehicleStatus, UserRole, PaymentType, ParkingRecordStatus
 import os, hmac, hashlib
 from auth.core.enums import ReservationStatus, PaymentStatus, SpaceStatus
-from datetime import datetime
+from datetime import datetime, timezone
 from wallet.services import settle_with_balance
-from parking.services import BillingRuleNotFoundError
+from parking.services import BillingRuleNotFoundError, compute_fee
 
 router = APIRouter(tags=["Parking"])
 
@@ -292,6 +293,31 @@ def parking_exit(record_id: int, request: ParkingRecordExitRequest, db: Session 
         if isinstance(e, BillingRuleNotFoundError):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="计费规则不存在")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="内部错误")
+
+@router.get("/parking-records/{record_id}/preview-fee")
+def preview_parking_fee(record_id: int, db: Session = Depends(get_db)):
+    rec = db.query(ParkingRecord).filter(ParkingRecord.id == record_id).first()
+    if not rec:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="停车记录不存在")
+    if rec.parking_lot_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="停车记录缺少停车场信息")
+    rule = db.query(BillingRule).filter(BillingRule.parking_lot_id == rec.parking_lot_id).first()
+    if not rule:
+        lot = db.query(ParkingLot).filter(ParkingLot.id == rec.parking_lot_id).first()
+        if not lot:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="停车场不存在")
+        rule = BillingRule(
+            parking_lot_id=rec.parking_lot_id,
+            rule_name="默认计费",
+            free_duration_minutes=30,
+            hourly_rate=5.0,
+            daily_cap_rate=50.0,
+        )
+        db.add(rule)
+        db.commit()
+        db.refresh(rule)
+    fee = compute_fee(rec.entry_time, datetime.now(timezone.utc), rule)
+    return {"fee": str(fee)}
 
 @router.get("/parking-records/me", response_model=List[ParkingRecordRead])
 def list_my_records(skip: int = 0, limit: int = 20, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
@@ -606,7 +632,7 @@ def api_stats(lot_id: int, db: Session = Depends(get_db)):
         db.rollback()
     return get_parking_stats(db, lot_id)
 @router.post("/parking-records/{record_id}/vacate", response_model=ParkingRecordRead)
-def vacate_by_record(record_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def vacate_by_record(record_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     try:
         rec = db.query(ParkingRecord).filter(ParkingRecord.id == record_id).first()
         if not rec:
@@ -619,12 +645,18 @@ def vacate_by_record(record_id: int, db: Session = Depends(get_db), current_user
         space = db.query(ParkingSpace).filter(
             ParkingSpace.parking_lot_id == rec.parking_lot_id,
             ParkingSpace.vehicle_id == rec.vehicle_id,
-        ).first()
-        if not space:
-            # 记录缺少停车场信息时无法结算
+        ).with_for_update().first()
+        vacated = False
+        if space and space.status == SpaceStatus.OCCUPIED and rec.status == ParkingRecordStatus.PARKED:
+            res = vacate_space(db, space.id, datetime.now(timezone.utc))
+            if res:
+                space, updated = res
+                db.refresh(updated)
+                rec = updated
+                vacated = True
+        if rec.exit_time is None or rec.status == ParkingRecordStatus.PARKED:
             if rec.parking_lot_id is None:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="停车记录缺少停车场信息")
-            # 若计费规则不存在，则创建一个默认计费规则以保障结算闭环
             rule = db.query(BillingRule).filter(BillingRule.parking_lot_id == rec.parking_lot_id).first()
             if not rule:
                 rule = BillingRule(
@@ -636,15 +668,23 @@ def vacate_by_record(record_id: int, db: Session = Depends(get_db), current_user
                 )
                 db.add(rule)
                 db.flush()
-        updated = complete_parking_record(db, record_id, datetime.utcnow())
+            updated = complete_parking_record(db, record_id, datetime.now(timezone.utc))
+            db.refresh(updated)
+            rec = updated
+            if space and space.status == SpaceStatus.OCCUPIED:
+                space.status = SpaceStatus.AVAILABLE
+                space.vehicle_id = None
+                space.occupied_at = None
+                space.reserved_until = None
+                vacated = True
         db.commit()
-        db.refresh(updated)
-        return updated
-        result = vacate_space(db, space.id, datetime.utcnow())
-        db.commit()
-        # 返回更新后的记录
-        updated = db.query(ParkingRecord).filter(ParkingRecord.id == record_id).first()
-        return updated
+        if vacated and space:
+            try:
+                background_tasks.add_task(manager.broadcast_to_lot, space.parking_lot_id, {"type": "space_vacated", "payload": {"space_id": space.id, "parking_lot_id": space.parking_lot_id}})
+            except Exception:
+                pass
+        db.refresh(rec)
+        return rec
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -654,7 +694,7 @@ def vacate_by_record(record_id: int, db: Session = Depends(get_db), current_user
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="内部错误")
 
 @router.post("/parking-records/{record_id}/exit-and-settle")
-def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+def exit_and_settle(record_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     try:
         rec = db.query(ParkingRecord).filter(ParkingRecord.id == record_id).first()
         if not rec:
@@ -665,8 +705,20 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
             v = db.query(Vehicle).filter(Vehicle.id == rec.vehicle_id).first()
             if not v or v.user_id != current_user.id:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权操作该记录")
-        # 直接完成计费与结算，不强依赖空间状态释放
-        # 完成计费（若尚未完成），确保存在计费规则
+        vacated = False
+        space = None
+        if rec.parking_lot_id is not None:
+            space = db.query(ParkingSpace).filter(
+                ParkingSpace.parking_lot_id == rec.parking_lot_id,
+                ParkingSpace.vehicle_id == rec.vehicle_id,
+            ).with_for_update().first()
+        if space and space.status == SpaceStatus.OCCUPIED and rec.status == ParkingRecordStatus.PARKED:
+            res = vacate_space(db, space.id, datetime.now(timezone.utc))
+            if res:
+                space, completed = res
+                db.refresh(completed)
+                rec = completed
+                vacated = True
         if rec.exit_time is None or rec.status == ParkingRecordStatus.PARKED:
             if rec.parking_lot_id is None:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="停车记录缺少停车场信息")
@@ -682,11 +734,11 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
                 db.add(rule)
                 db.flush()
             try:
-                completed = complete_parking_record(db, record_id, datetime.utcnow())
+                completed = complete_parking_record(db, record_id, datetime.now(timezone.utc))
                 db.refresh(completed)
                 rec = completed
             except Exception:
-                rec.exit_time = datetime.utcnow()
+                rec.exit_time = datetime.now(timezone.utc)
                 rec.fee = 0
                 rec.status = ParkingRecordStatus.UNPAID
                 db.execute(
@@ -694,10 +746,21 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
                     .where(ParkingLot.id == rec.parking_lot_id, ParkingLot.available_spots < ParkingLot.total_capacity)
                     .values(available_spots=ParkingLot.available_spots + 1)
                 )
+            if space and space.status == SpaceStatus.OCCUPIED:
+                space.status = SpaceStatus.AVAILABLE
+                space.vehicle_id = None
+                space.occupied_at = None
+                space.reserved_until = None
+                vacated = True
         # 幂等：如已有余额成功支付，则直接返回成功
         existing_success = db.query(Payment).filter(Payment.parking_record_id == record_id, Payment.status == PaymentStatus.SUCCESS).first()
         if existing_success:
             db.commit()
+            if vacated and space:
+                try:
+                    background_tasks.add_task(manager.broadcast_to_lot, space.parking_lot_id, {"type": "space_vacated", "payload": {"space_id": space.id, "parking_lot_id": space.parking_lot_id}})
+                except Exception:
+                    pass
             return {"detail": "已结算", "amount": str(existing_success.amount)}
         # 使用余额结算
         amount = rec.fee if rec.fee is not None else None
@@ -710,6 +773,11 @@ def exit_and_settle(record_id: int, db: Session = Depends(get_db), current_user=
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="余额不足")
         # 余额结算成功：保证记录状态为 PAID，保留记录以支持幂等
         db.commit()
+        if vacated and space:
+            try:
+                background_tasks.add_task(manager.broadcast_to_lot, space.parking_lot_id, {"type": "space_vacated", "payload": {"space_id": space.id, "parking_lot_id": space.parking_lot_id}})
+            except Exception:
+                pass
         return {"detail": "结算成功", "amount": str(amount)}
     except HTTPException as e:
         raise e
